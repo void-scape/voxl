@@ -1,11 +1,13 @@
 layout (location = 0) in vec3 position;
 layout (location = 1) in vec3 normal;
 layout (location = 2) in vec2 auv;
-layout (location = 3) in vec3 translation;
+layout (location = 3) in vec2 atlas_index;
+layout (location = 4) in vec3 translation;
 
 uniform mat4 proj, view;
+uniform vec2 atlas_size, texture_size;
 
-out vec3 frag_position, frag_normal;
+out vec3 frag_view_position, frag_position, frag_normal;
 out vec2 uv;
 
 void main() {
@@ -17,6 +19,7 @@ void main() {
 	vec4 model_position = model * vec4(position, 1.0);
 	gl_Position = proj * view * model_position;
 	frag_position = vec3(model_position);
+	frag_view_position = vec3(view * model_position);
 	frag_normal = mat3(transpose(inverse(model))) * normal;
-	uv = auv;
+	uv = (atlas_index + auv) * (texture_size / atlas_size);
 }

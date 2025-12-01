@@ -3,10 +3,13 @@ use glam::{FloatExt, Mat4, Quat, Vec2, Vec3};
 use glazer::glow::{self, HasContext};
 use glazer::winit::event::{DeviceEvent, KeyEvent, WindowEvent};
 use glazer::winit::keyboard::{KeyCode, PhysicalKey};
+use std::collections::HashMap;
 
 mod gui;
 mod shader;
 mod voxel;
+
+const CHUNK_WIDTH: usize = 16;
 
 #[derive(Default)]
 pub struct Memory {
@@ -16,8 +19,28 @@ pub struct Memory {
 struct World {
     gui: gui::Egui,
     voxel_renderer: VoxelRenderer,
+    wireframes: bool,
+    fog: bool,
+    view_distance: usize,
     camera_controller: CameraController,
-    voxels: Vec<Vec3>,
+    loaded_chunks: HashMap<(i64, i64), Chunk>,
+    unloaded_chunks: Vec<Chunk>,
+    noise_layers: Vec<(f32, f32)>,
+}
+
+#[derive(Default)]
+struct Chunk {
+    translations: Vec<Vec3>,
+    uvs: Vec<[Vec2; 6]>,
+}
+
+impl Chunk {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            translations: Vec::with_capacity(capacity),
+            uvs: Vec::with_capacity(capacity),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -96,6 +119,21 @@ pub fn handle_input(
                     KeyCode::ShiftLeft => {
                         world.camera_controller.down = state.is_pressed();
                     }
+                    KeyCode::KeyF if state.is_pressed() => {
+                        if world.fog {
+                            world
+                                .voxel_renderer
+                                .bind_view_distance(gl, world.view_distance);
+                        } else {
+                            world
+                                .voxel_renderer
+                                .bind_view_distance(gl, world.view_distance * 10);
+                        }
+                        world.fog = !world.fog;
+                    }
+                    KeyCode::KeyV if state.is_pressed() => {
+                        world.wireframes = !world.wireframes;
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -109,7 +147,10 @@ pub fn handle_input(
                 let sensitivity = 0.005;
                 world.camera_controller.yaw += delta.0 as f32 * sensitivity;
                 world.camera_controller.pitch -= delta.1 as f32 * sensitivity;
-                world.camera_controller.pitch = world.camera_controller.pitch.clamp(-89.0, 89.0);
+                world.camera_controller.pitch = world.camera_controller.pitch.clamp(
+                    -std::f32::consts::FRAC_PI_2 + 0.0001,
+                    std::f32::consts::FRAC_PI_2 - 0.0001,
+                );
                 let yaw = world.camera_controller.yaw;
                 let pitch = world.camera_controller.pitch;
                 world.camera_controller.look_at = look_at(pitch, yaw);
@@ -141,42 +182,26 @@ pub fn update_and_render(
 ) {
     window.set_title(&format!("Voxl - {:.2}", 1.0 / delta));
 
-    let uv_size = 200;
-    let voxel_count = 200;
+    let view_distance = 12;
     let speed = 100.0;
-
     let pitch = -0.599;
     let yaw = 1.569;
     let world = memory.world.get_or_insert_with(|| World {
         gui: gui::Egui::new(event_loop, window, gl),
-        voxel_renderer: VoxelRenderer::new(gl, width, height),
+        voxel_renderer: VoxelRenderer::new(gl, width, height, view_distance, "assets/terrain.png"),
+        wireframes: false,
+        fog: false,
+        view_distance,
         camera_controller: CameraController {
             look_at: look_at(pitch, yaw),
-            translation: Vec3::new(
-                -(voxel_count as f32 / 2.0),
-                -(voxel_count as f32 / 3.0),
-                10.0,
-            ),
+            translation: Vec3::new(0.0, 0.0, 10.0),
             pitch,
             yaw,
             ..Default::default()
         },
-        voxels: {
-            let mut voxels = Vec::with_capacity(voxel_count * voxel_count);
-            for z in 0..voxel_count {
-                for x in 0..voxel_count {
-                    let uv = Vec2::new(x as f32 / uv_size as f32, z as f32 / uv_size as f32);
-                    let low = perlin(uv) * 0.5 + 0.5;
-                    let medium = perlin(uv * 2.0) * 0.5 + 0.5;
-                    let high = perlin(uv * 6.0) * 0.5 + 0.5;
-                    let surface = low * 80.0 + medium * 40.0 + high * 30.0;
-                    for y in 0..surface.round() as usize {
-                        voxels.push(Vec3::new(x as f32, y as f32 - 80.0, z as f32));
-                    }
-                }
-            }
-            voxels
-        },
+        loaded_chunks: HashMap::new(),
+        unloaded_chunks: Vec::new(),
+        noise_layers: vec![(1.0, 80.0), (2.0, 40.0), (6.0, 30.0)],
     });
 
     if world.camera_controller.enabled {
@@ -202,6 +227,8 @@ pub fn update_and_render(
         }
     }
 
+    update_chunks(world);
+
     unsafe {
         gl.clear_color(0.0, 0.0, 0.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
@@ -214,20 +241,117 @@ pub fn update_and_render(
         world
             .voxel_renderer
             .bind_view(gl, world.camera_controller.translation, view);
-        world.voxel_renderer.render_batch(gl, &world.voxels);
+
+        if world.wireframes {
+            gl.polygon_mode(glow::FRONT_AND_BACK, glow::LINE);
+        } else {
+            gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
+        }
+        // TODO: Arena allocation for voxels?
+        for chunk in world.loaded_chunks.values() {
+            world
+                .voxel_renderer
+                .render_batch(gl, &chunk.translations, &chunk.uvs);
+        }
     }
 
+    let mut changed_chunk_generation = false;
     world.gui.show(|ui| {
         egui::Window::new("Voxl").show(ui, |ui| {
             egui::ScrollArea::both().show(ui, |ui| {
-                ui.heading("Hello World!");
-                if ui.button("Quit").clicked() {
-                    std::process::exit(0);
+                ui.add(egui::Slider::new(&mut world.view_distance, 1..=32).text("View Distance"));
+
+                ui.label("Noise Layers");
+                ui.horizontal(|ui| {
+                    if ui.button("-").clicked() {
+                        world.noise_layers.pop();
+                    }
+                    if ui.button("+").clicked() {
+                        world.noise_layers.push((1.0, 1.0));
+                    }
+                });
+                for (i, (scale, weight)) in world.noise_layers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Layer {i}"));
+                        changed_chunk_generation |= ui
+                            .add(egui::Slider::new(scale, -100.0..=100.0).text("UV Scale"))
+                            .changed();
+                        changed_chunk_generation |= ui
+                            .add(egui::Slider::new(weight, -100.0..=100.0).text("Weight"))
+                            .changed();
+                    });
                 }
             })
         });
     });
+
+    if changed_chunk_generation {
+        world
+            .unloaded_chunks
+            .extend(world.loaded_chunks.drain().map(|(_, v)| v));
+        update_chunks(world);
+    }
+
     world.gui.paint();
+}
+
+fn update_chunks(world: &mut World) {
+    let view_distance = world.view_distance as i64;
+    let current_chunk = (-world.camera_controller.translation / CHUNK_WIDTH as f32).as_i64vec3();
+    let zrange = current_chunk.z - view_distance..=current_chunk.z + view_distance;
+    let xrange = current_chunk.x - view_distance..=current_chunk.x + view_distance;
+
+    world.loaded_chunks.retain(|(x, z), buffer| {
+        if !xrange.contains(x) || !zrange.contains(z) {
+            world.unloaded_chunks.push(core::mem::take(buffer));
+            false
+        } else {
+            true
+        }
+    });
+
+    for z in zrange {
+        for x in xrange.clone() {
+            if !world.loaded_chunks.contains_key(&(x, z)) {
+                load_chunk(world, x, z);
+            }
+        }
+    }
+}
+
+fn load_chunk(world: &mut World, x: i64, z: i64) {
+    let perlin_scale = 200;
+
+    let mut chunk = world
+        .unloaded_chunks
+        .pop()
+        .unwrap_or_else(|| Chunk::with_capacity(CHUNK_WIDTH * CHUNK_WIDTH));
+    chunk.translations.clear();
+    chunk.uvs.clear();
+
+    let zoffset = z as f32 * CHUNK_WIDTH as f32;
+    let xoffset = x as f32 * CHUNK_WIDTH as f32;
+    for z in 0..CHUNK_WIDTH {
+        for x in 0..CHUNK_WIDTH {
+            let x = x as f32 + xoffset;
+            let z = z as f32 + zoffset;
+            let uv = Vec2::new(x / perlin_scale as f32, z / perlin_scale as f32);
+
+            let mut surface = 0.0;
+            for (uv_scale, weight) in world.noise_layers.iter() {
+                surface += (perlin(uv * uv_scale) * 0.5 + 0.5) * weight;
+            }
+
+            chunk
+                .translations
+                .push(Vec3::new(x, surface.round() - 80.0, z));
+            chunk.uvs.push([Vec2::new(8.0, 6.0); 6]);
+            // for y in 0..surface.round() as usize {
+            //     voxels.push(Vec3::new(x as f32, y as f32 - 80.0, z as f32));
+            // }
+        }
+    }
+    assert!(world.loaded_chunks.insert((x, z), chunk).is_none());
 }
 
 // https://thebookofshaders.com/edit.php#11/2d-gnoise.frag
