@@ -1,4 +1,4 @@
-use crate::{CHUNK_WIDTH, shader::uniform};
+use crate::shader::uniform;
 use glam::{Mat4, Vec2, Vec3};
 use glazer::glow::{self, HasContext};
 use image::EncodableLayout;
@@ -143,7 +143,7 @@ impl VoxelRenderer {
                 instances,
                 atlas_offsets,
             };
-            slf.bind_view_distance(gl, view_distance);
+            slf.bind_view_distance(gl, view_distance, crate::chunk::CHUNK_SIZE);
             slf
         }
     }
@@ -172,14 +172,14 @@ impl VoxelRenderer {
         }
     }
 
-    pub fn bind_view_distance(&self, gl: &glow::Context, view_distance: usize) {
+    pub fn bind_view_distance(&self, gl: &glow::Context, view_distance: usize, chunk_size: usize) {
         unsafe {
             gl.use_program(Some(self.shader));
             uniform(gl, self.shader, "fog_near", |location| {
-                gl.uniform_1_f32(location, (CHUNK_WIDTH * (view_distance - 2)) as f32);
+                gl.uniform_1_f32(location, (chunk_size * (view_distance - 2)) as f32);
             });
             uniform(gl, self.shader, "fog_far", |location| {
-                gl.uniform_1_f32(location, (CHUNK_WIDTH * view_distance) as f32);
+                gl.uniform_1_f32(location, (chunk_size * view_distance) as f32);
             });
         }
     }
