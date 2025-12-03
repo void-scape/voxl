@@ -129,7 +129,7 @@ impl VoxelRenderer {
                 gl.uniform_matrix_4_f32_slice(location, false, &proj_matrix.to_cols_array());
             });
             uniform(gl, shader, "ambient_brightness", |location| {
-                gl.uniform_1_f32(location, 0.1);
+                gl.uniform_1_f32(location, 0.4);
             });
             let (texture, texture_size) = load_image(gl, textures);
 
@@ -258,12 +258,12 @@ fn load_image(gl: &glow::Context, path: &str) -> (glow::Texture, (f32, f32)) {
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
             glow::TEXTURE_MIN_FILTER,
-            glow::LINEAR as i32,
+            glow::NEAREST as i32,
         );
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
             glow::TEXTURE_MAG_FILTER,
-            glow::LINEAR as i32,
+            glow::NEAREST as i32,
         );
 
         gl.tex_image_2d(

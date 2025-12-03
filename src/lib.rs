@@ -345,7 +345,7 @@ fn load_chunk(world: &mut World, x: i64, z: i64) {
             chunk
                 .translations
                 .push(Vec3::new(x, surface.round() - 80.0, z));
-            chunk.uvs.push([Vec2::new(8.0, 6.0); 6]);
+            chunk.uvs.push([Vec2::new(0.0, 1.0); 6]);
             // for y in 0..surface.round() as usize {
             //     voxels.push(Vec3::new(x as f32, y as f32 - 80.0, z as f32));
             // }
