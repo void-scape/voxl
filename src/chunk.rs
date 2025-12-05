@@ -1,7 +1,11 @@
-use crate::{World, camera::Camera};
+use crate::{
+    World,
+    camera::Camera,
+    voxel::{Lighting, VoxelInstanceBuffer, VoxelRenderer},
+};
 use glam::{FloatExt, Vec2, Vec3};
 use glazer::glow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const CHUNK_SIZE: usize = 16;
 
@@ -9,7 +13,7 @@ pub const CHUNK_SIZE: usize = 16;
 pub struct Chunks {
     loaded_chunks: HashMap<(i64, i64), Chunk>,
     unloaded_chunks: Vec<Chunk>,
-    pub noise_layers: Vec<(f32, f32)>,
+    noise_layers: Vec<(f32, f32)>,
 }
 
 impl Chunks {
@@ -28,20 +32,22 @@ impl Chunks {
 
 #[derive(Default)]
 struct Chunk {
-    translations: Vec<Vec3>,
-    uvs: Vec<[Vec2; 6]>,
+    buffers: Option<(VoxelInstanceBuffer, Vec<[Vec2; 6]>)>,
 }
 
 impl Chunk {
     fn with_capacity(capacity: usize) -> Self {
-        Self {
-            translations: Vec::with_capacity(capacity),
-            uvs: Vec::with_capacity(capacity),
-        }
+        Self { buffers: None }
     }
 }
 
-pub fn update(chunks: &mut Chunks, view_distance: usize, camera: &Camera) {
+pub fn update(
+    gl: &glow::Context,
+    voxel_renderer: &VoxelRenderer,
+    chunks: &mut Chunks,
+    view_distance: usize,
+    camera: &Camera,
+) {
     let view_distance = view_distance as i64;
     let current_chunk = (-camera.translation / CHUNK_SIZE as f32).as_i64vec3();
     let zrange = current_chunk.z - view_distance..=current_chunk.z + view_distance;
@@ -59,13 +65,20 @@ pub fn update(chunks: &mut Chunks, view_distance: usize, camera: &Camera) {
     for z in zrange {
         for x in xrange.clone() {
             if !chunks.loaded_chunks.contains_key(&(x, z)) {
-                load_chunk(chunks, x, z);
+                load_chunk(gl, voxel_renderer, chunks, x, z);
             }
         }
     }
 }
 
-pub fn ui(ui: &mut egui::Ui, chunks: &mut Chunks, view_distance: usize, camera: &Camera) {
+pub fn ui(
+    ui: &mut egui::Ui,
+    gl: &glow::Context,
+    voxel_renderer: &VoxelRenderer,
+    chunks: &mut Chunks,
+    view_distance: usize,
+    camera: &Camera,
+) {
     let mut changed_chunk_generation = false;
 
     ui.label("Noise Layers");
@@ -91,43 +104,88 @@ pub fn ui(ui: &mut egui::Ui, chunks: &mut Chunks, view_distance: usize, camera: 
 
     if changed_chunk_generation {
         chunks.clear();
-        update(chunks, view_distance, camera);
+        update(gl, voxel_renderer, chunks, view_distance, camera);
     }
 }
 
-pub fn render(world: &mut World, gl: &glow::Context) {
-    let light_source = Vec3::new(20.0, 100.0, 20.0);
-    world.voxel_renderer.bind_light_source(gl, light_source);
-
+pub fn render(world: &mut World, gl: &glow::Context, width: usize, height: usize) {
+    let lighting = Lighting {
+        light_source: Vec3::new(0.0, 50.0, -120.0),
+        light_color: Vec3::ONE,
+        ambient_brightness: 0.4,
+    };
     let view = world.camera.view_matrix();
-    world
-        .voxel_renderer
-        .bind_view(gl, world.camera.translation, view);
 
-    // TODO: Arena allocation for voxels?
-    for chunk in world.chunks.loaded_chunks.values() {
-        world
-            .voxel_renderer
-            .render_batch(gl, &chunk.translations, &chunk.uvs);
-    }
+    let (fog_near, fog_far) = if world.fog {
+        let near = ((world.view_distance - 2) * CHUNK_SIZE) as f32;
+        let far = (world.view_distance * CHUNK_SIZE) as f32;
+        (near, far)
+    } else {
+        (
+            (world.view_distance * CHUNK_SIZE * 10) as f32,
+            (world.view_distance * CHUNK_SIZE * 10) as f32,
+        )
+    };
+
+    let translations_for_shadow_pass = world
+        .chunks
+        .loaded_chunks
+        .values()
+        .flat_map(|chunk| chunk.buffers.as_ref().map(|(instances, _)| *instances));
+    let translations_and_atlas_uvs = world.chunks.loaded_chunks.values().flat_map(|chunk| {
+        chunk
+            .buffers
+            .as_ref()
+            .map(|(instances, uvs)| (*instances, uvs.as_slice()))
+    });
+
+    world.voxel_renderer.render_pass(
+        gl,
+        width,
+        height,
+        lighting,
+        view,
+        fog_near,
+        fog_far,
+        translations_for_shadow_pass,
+        translations_and_atlas_uvs,
+    );
+
+    world.sprite_renderer.render(
+        gl,
+        Vec3::new(950.0, 400.0, 0.0),
+        Vec2::ONE * 0.5,
+        glam::Quat::default(),
+        world.voxel_renderer.shadow_map,
+        1024,
+        1024,
+    );
 }
 
-fn load_chunk(chunks: &mut Chunks, x: i64, z: i64) {
+// TODO: this shit is trash
+fn load_chunk(
+    gl: &glow::Context,
+    voxel_renderer: &VoxelRenderer,
+    chunks: &mut Chunks,
+    x: i64,
+    z: i64,
+) {
     let perlin_scale = 200;
 
     let mut chunk = chunks
         .unloaded_chunks
         .pop()
         .unwrap_or_else(|| Chunk::with_capacity(CHUNK_SIZE * CHUNK_SIZE));
-    chunk.translations.clear();
-    chunk.uvs.clear();
+
+    let mut translations = Vec::new();
+    let mut uvs = Vec::new();
 
     let zoffset = z as f32 * CHUNK_SIZE as f32;
     let xoffset = x as f32 * CHUNK_SIZE as f32;
     for z in 0..CHUNK_SIZE {
         for x in 0..CHUNK_SIZE {
-            let x = x as f32 + xoffset;
             let z = z as f32 + zoffset;
+            let x = x as f32 + xoffset;
             let uv = Vec2::new(x / perlin_scale as f32, z / perlin_scale as f32);
 
             let mut surface = 0.0;
@@ -135,15 +193,48 @@ fn load_chunk(chunks: &mut Chunks, x: i64, z: i64) {
                 surface += (perlin(uv * *uv_scale) * 0.5 + 0.5) * weight;
             }
 
-            chunk
-                .translations
-                .push(Vec3::new(x, surface.round() - 80.0, z));
-            chunk.uvs.push([Vec2::new(0.0, 1.0); 6]);
+            translations.push(Vec3::new(x, surface.round() - 80.0, z));
+            uvs.push([Vec2::new(0.0, 1.0); 6]);
             // for y in 0..surface.round() as usize {
-            //     voxels.push(Vec3::new(x as f32, y as f32 - 80.0, z as f32));
+            //     translations.push(Vec3::new(x, y as f32 - 80.0, z));
+            //     uvs.push([Vec2::new(0.0, 1.0); 6]);
             // }
         }
     }
+
+    let mut hash = HashSet::<(i64, i64, i64)>::from_iter(
+        translations
+            .iter()
+            .map(|t| (t.x as i64, t.y as i64, t.z as i64)),
+    );
+    let mut remove = Vec::new();
+    'outer: for (i, translation) in translations.iter().enumerate() {
+        for z in -1..=1 {
+            for y in -1..=1 {
+                for x in -1..=1 {
+                    if hash.insert((
+                        translation.x as i64 + x,
+                        translation.y as i64 + y,
+                        translation.z as i64 + z,
+                    )) {
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+        remove.push(i);
+    }
+
+    for index in remove.into_iter().rev() {
+        translations.swap_remove(index);
+        uvs.swap_remove(index);
+    }
+
+    chunk.buffers = Some((
+        voxel_renderer.generate_translation_buffer(gl, &translations),
+        uvs,
+    ));
+
     assert!(chunks.loaded_chunks.insert((x, z), chunk).is_none());
 }
 
@@ -162,7 +253,7 @@ fn perlin(st: Vec2) -> f32 {
     }
 
     let i = st.floor();
-    let f = st.fract();
+    let f = st - i;
     let u = f * f * (3.0 - 2.0 * f);
 
     let left = random2(i)

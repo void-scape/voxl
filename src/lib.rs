@@ -1,5 +1,8 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::camera::Camera;
 use crate::chunk::Chunks;
+use crate::sprite::SpriteRenderer;
 use crate::voxel::VoxelRenderer;
 use glam::Vec3;
 use glazer::glow::{self, HasContext};
@@ -10,6 +13,7 @@ mod camera;
 mod chunk;
 mod gui;
 mod shader;
+mod sprite;
 mod voxel;
 
 #[derive(Default)]
@@ -20,6 +24,7 @@ pub struct Memory {
 struct World {
     gui: gui::Egui,
     voxel_renderer: VoxelRenderer,
+    sprite_renderer: SpriteRenderer,
     wireframes: bool,
     fog: bool,
     view_distance: usize,
@@ -50,6 +55,7 @@ pub fn handle_input(
                 let w = size.width as usize;
                 let h = size.height as usize;
                 world.voxel_renderer.resize(gl, w, h);
+                world.sprite_renderer.resize(gl, w, h);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -65,19 +71,6 @@ pub fn handle_input(
                     std::process::exit(0);
                 }
                 KeyCode::KeyF if state.is_pressed() => {
-                    if world.fog {
-                        world.voxel_renderer.bind_view_distance(
-                            gl,
-                            world.view_distance,
-                            chunk::CHUNK_SIZE,
-                        );
-                    } else {
-                        world.voxel_renderer.bind_view_distance(
-                            gl,
-                            world.view_distance * 10,
-                            chunk::CHUNK_SIZE,
-                        );
-                    }
                     world.fog = !world.fog;
                 }
                 KeyCode::KeyV if state.is_pressed() => {
@@ -112,38 +105,47 @@ pub fn update_and_render(
     let view_distance = 12;
     let world = memory.world.get_or_insert_with(|| World {
         gui: gui::Egui::new(event_loop, window, gl),
-        voxel_renderer: VoxelRenderer::new(gl, width, height, view_distance, "assets/terrain.png"),
+        voxel_renderer: VoxelRenderer::new(gl, width, height, "assets/terrain.png"),
+        sprite_renderer: SpriteRenderer::new(gl, width, height),
         wireframes: false,
         fog: false,
         view_distance,
         camera: Camera::new(100.0, Vec3::ZERO, 0.0, 0.0),
-        chunks: Chunks::from_noise(vec![(1.0, 80.0), (2.0, 40.0), (6.0, 30.0)]),
+        chunks: Chunks::from_noise(vec![(1.5, 80.0), (3.0, 40.0), (8.0, 30.0)]),
     });
 
     camera::update(&mut world.camera, delta);
-    chunk::update(&mut world.chunks, world.view_distance, &world.camera);
+    chunk::update(
+        gl,
+        &world.voxel_renderer,
+        &mut world.chunks,
+        world.view_distance,
+        &world.camera,
+    );
 
     unsafe {
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
-        gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-
         if world.wireframes {
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::LINE);
         } else {
             gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
         }
 
-        chunk::render(world, gl);
-    }
-
-    unsafe {
+        chunk::render(world, gl, width, height);
         gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
     }
+
     world.gui.show(|ui| {
         egui::Window::new("Voxl").show(ui, |ui| {
             egui::ScrollArea::both().show(ui, |ui| {
                 ui.add(egui::Slider::new(&mut world.view_distance, 1..=32).text("View Distance"));
-                chunk::ui(ui, &mut world.chunks, world.view_distance, &world.camera);
+                chunk::ui(
+                    ui,
+                    gl,
+                    &world.voxel_renderer,
+                    &mut world.chunks,
+                    world.view_distance,
+                    &world.camera,
+                );
             })
         });
     });

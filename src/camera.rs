@@ -109,20 +109,20 @@ fn look_at(pitch: f32, yaw: f32) -> Vec3 {
 
 pub fn update(camera: &mut Camera, delta: f32) {
     if camera.enabled {
-        let dt = -camera.speed * delta;
         // https://sotrh.github.io/learn-wgpu/intermediate/tutorial12-camera/#the-projection
         let (yaw_sin, yaw_cos) = camera.yaw.sin_cos();
         let forward = Vec3::new(yaw_cos, 0.0, yaw_sin).normalize();
         let right = Vec3::new(-yaw_sin, 0.0, yaw_cos).normalize();
-        camera.translation +=
-            forward * (camera.forward as u32 as f32 - camera.back as u32 as f32) * dt;
-        camera.translation += right * (camera.right as u32 as f32 - camera.left as u32 as f32) * dt;
+        let mut dxz = Vec3::ZERO;
+        dxz += forward * (camera.forward as u32 as f32 - camera.back as u32 as f32);
+        dxz += right * (camera.right as u32 as f32 - camera.left as u32 as f32);
+        camera.translation += dxz.normalize_or_zero() * -camera.speed * delta;
 
         if camera.down {
-            camera.translation.y -= dt;
+            camera.translation.y -= -camera.speed * delta;
         }
         if camera.up {
-            camera.translation.y += dt;
+            camera.translation.y += -camera.speed * delta;
         }
     }
 }

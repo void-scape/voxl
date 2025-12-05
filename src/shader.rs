@@ -34,6 +34,23 @@ macro_rules! compile_shader {
     };
 }
 
+#[macro_export]
+macro_rules! compile_shader_with {
+    ($gl:ident, $vert:expr, $frag:expr) => {
+        $crate::shader::compile_shader(
+            $gl,
+            #[cfg(not(target_arch = "wasm32"))]
+            &format!("#version 330 core\n{}", $vert),
+            #[cfg(target_arch = "wasm32")]
+            &format!("#version 300 es\n{}", $vert),
+            #[cfg(not(target_arch = "wasm32"))]
+            &format!("#version 330 core\n{}", $frag),
+            #[cfg(target_arch = "wasm32")]
+            &format!("#version 300 es\nprecision mediump float;\n{}", $frag),
+        )
+    };
+}
+
 // https://learnopengl.com/Getting-started/Shaders
 pub fn compile_shader(gl: &glow::Context, vertex: &str, fragment: &str) -> glow::Program {
     unsafe {
